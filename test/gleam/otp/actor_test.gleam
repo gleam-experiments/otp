@@ -32,14 +32,47 @@ pub fn get_status_test() {
 }
 
 pub fn failed_init_test() {
-  actor.Spec(
-    init: fn() { actor.Failed("not enough wiggles") },
-    loop: fn(_msg, state) { actor.continue(state) },
-    init_timeout: 10,
-  )
-  |> actor.start_spec
-  |> result.is_error
+  let server =
+    process.start(linked: False, running: fn() {
+      actor.Spec(
+        init: fn() { actor.Failed("not enough wiggles") },
+        loop: fn(_msg, state) { actor.continue(state) },
+        init_timeout: 10,
+      )
+      |> actor.start_spec
+      |> result.is_error
+      |> should.be_true
+    })
+
+  // Check that our server is alive
+  process.is_alive(server)
   |> should.be_true
+
+  // Create a monitor to check if our monitor is down
+  let monitor = process.monitor_process(server)
+  let selector =
+    process.new_selector()
+    |> process.selecting_process_down(monitor, Mon)
+
+  let result = case process.select(selector, 500) {
+    // Child got shutdown
+    Ok(Mon(_down)) -> Error(dynamic.from("init_failed"))
+
+    // Child did not finish initialising in time
+    _ -> {
+      Error(dynamic.from("timeout"))
+    }
+  }
+
+  result
+  |> should.equal(Error(dynamic.from("init_failed")))
+
+  // Check that the server is not longer running
+  process.is_alive(server)
+  |> should.be_false
+
+  // teardown
+  process.demonitor_process(monitor)
 }
 
 pub fn timed_out_init_test() {
@@ -231,6 +264,114 @@ pub fn replace_selector_test() {
   |> should.equal(dynamic.from("unknown message: String"))
 }
 
+type ActorExitMessage {
+  Shutdown(reason: process.ExitReason)
+  GetPid(reply: Subject(Result(Pid, Nil)))
+}
+
+pub fn exit_actor_normally_test() {
+  // We don't need to create a server and monitor it. An exit with reason
+  // "normal" won't crash our whole test suite.
+  //
+  // More information: https://www.erlang.org/doc/apps/erts/erlang#exit/2
+  let assert Ok(actor_exits_normal) =
+    actor.start(Nil, fn(message: ActorExitMessage, state) {
+      case message {
+        Shutdown(reason) -> {
+          actor.Stop(reason)
+        }
+        GetPid(client) -> {
+          let self = process.self()
+          process.send(client, Ok(self))
+          actor.continue(state)
+        }
+      }
+    })
+
+  let assert Ok(actor_pid) = process.call(actor_exits_normal, GetPid, 10)
+
+  // Check that the actor is still alive
+  process.is_alive(actor_pid)
+  |> should.be_true
+
+  let assert Ok(actor_pid) = process.call(actor_exits_normal, GetPid, 10)
+  process.send(actor_exits_normal, Shutdown(process.Normal))
+
+  // Check that the actor has exited after the Shutdown message
+  process.is_alive(actor_pid)
+  |> should.be_false
+}
+
+pub fn exit_actor_abnormal_test() {
+  let exit_type = process.Abnormal("por que maria?")
+  let server = init_server_exit(exit_type)
+
+  // check that server is still alive
+  process.is_alive(server)
+  |> should.be_true
+
+  let monitor = process.monitor_process(server)
+  let selector =
+    process.new_selector()
+    |> process.selecting_process_down(monitor, Mon)
+
+  let result = case process.select(selector, 500) {
+    // Child got shutdown
+    Ok(Mon(down)) -> Error(down.reason)
+
+    // Child did not finish initialising in time
+    _ -> {
+      Error(dynamic.from("timeout"))
+    }
+  }
+
+  result
+  |> should.equal(Error(dynamic.from(exit_type)))
+
+  // server shouldn't be alive because our Actor got an exit signal
+  // with a Abnormal(reason).
+  process.is_alive(server)
+  |> should.be_false
+
+  // teardown
+  process.demonitor_process(monitor)
+}
+
+pub fn exit_actor_kill_test() {
+  let exit_type = process.Killed
+  let server = init_server_exit(exit_type)
+
+  // check that server is still alive
+  process.is_alive(server)
+  |> should.be_true
+
+  let monitor = process.monitor_process(server)
+  let selector =
+    process.new_selector()
+    |> process.selecting_process_down(monitor, Mon)
+
+  let result = case process.select(selector, 500) {
+    // Child got shutdown
+    Ok(Mon(down)) -> Error(down.reason)
+
+    // Child did not finish initialising in time
+    _ -> {
+      Error(dynamic.from("timeout"))
+    }
+  }
+
+  result
+  |> should.equal(Error(dynamic.from(exit_type)))
+
+  // server shouldn't be alive because our actor got an exit signal
+  // with a Killed reason (brute force killing a child process).
+  process.is_alive(server)
+  |> should.be_false
+
+  // teardown
+  process.demonitor_process(monitor)
+}
+
 fn mapped_selector(mapper: fn(a) -> ActorMessage) {
   let subject = process.new_subject()
 
@@ -252,6 +393,47 @@ fn get_actor_state(subject: Subject(a)) {
   subject
   |> process.subject_owner
   |> system.get_state
+}
+
+type Mon {
+  Mon(process.ProcessDown)
+}
+
+fn init_server_exit(shutdown: process.ExitReason) -> process.Pid {
+  // Actors use the option linked which means that if actor throws an exception
+  // it will stop the execution of the link process. That's why we need to set
+  // a "server" to run our Actor. The moment we send the Shutdown message to the
+  // Actor, this will throw an exception and stop the execution of our "server"
+  // without stoping the `gleam test` command.
+
+  process.start(linked: False, running: fn() {
+    let assert Ok(actor_subject) =
+      actor.start(Nil, fn(message: ActorExitMessage, state) {
+        case message {
+          Shutdown(reason) -> {
+            actor.Stop(reason)
+          }
+          GetPid(client) -> {
+            let self = process.self()
+            process.send(client, Ok(self))
+            actor.continue(state)
+          }
+        }
+      })
+
+    let assert Ok(actor_pid) = process.call(actor_subject, GetPid, 10)
+
+    // First we check that the actor is still alive
+    process.is_alive(actor_pid)
+    |> should.be_true
+
+    // the actor has a link to our server which should make it crash
+    // but it shouldn't be affecting our main test runner
+    process.send(actor_subject, Shutdown(shutdown))
+
+    // give some time to the actor to process the message
+    process.sleep(50)
+  })
 }
 
 @external(erlang, "erlang", "send")

@@ -1,6 +1,6 @@
 //// This module provides the _Actor_ abstraction, one of the most common
 //// building blocks of Gleam OTP programs.
-//// 
+////
 //// An Actor is a process like any other BEAM process and can be used to hold
 //// state, execute code, and communicate with other processes by sending and
 //// receiving messages. The advantage of using the actor abstraction over a bare
@@ -25,18 +25,18 @@
 ////   // Start the actor with initial state of an empty list, and the
 ////   // `handle_message` callback function (defined below).
 ////   // We assert that it starts successfully.
-////   // 
+////   //
 ////   // In real-world Gleam OTP programs we would likely write wrapper functions
 ////   // called `start`, `push` `pop`, `shutdown` to start and interact with the
-////   // Actor. We are not doing that here for the sake of showing how the Actor 
+////   // Actor. We are not doing that here for the sake of showing how the Actor
 ////   // API works.
 ////   let assert Ok(my_actor) = actor.start([], handle_message)
-//// 
+////
 ////   // We can send a message to the actor to push elements onto the stack.
 ////   process.send(my_actor, Push("Joe"))
 ////   process.send(my_actor, Push("Mike"))
 ////   process.send(my_actor, Push("Robert"))
-//// 
+////
 ////   // The `Push` message expects no response, these messages are sent purely for
 ////   // the side effect of mutating the state held by the actor.
 ////   //
@@ -50,10 +50,10 @@
 ////   let assert Ok("Robert") = process.call(my_actor, Pop, 10)
 ////   let assert Ok("Mike") = process.call(my_actor, Pop, 10)
 ////   let assert Ok("Joe") = process.call(my_actor, Pop, 10)
-//// 
+////
 ////   // The stack is now empty, so if we pop again the actor replies with an error.
 ////   let assert Error(Nil) = process.call(my_actor, Pop, 10)
-//// 
+////
 ////   // Lastly, we can send a message to the actor asking it to shut down.
 ////   process.send(my_actor, Shutdown)
 //// }
@@ -74,18 +74,18 @@
 ////   // The `Shutdown` message is used to tell the actor to stop.
 ////   // It is the simplest message type, it contains no data.
 ////   Shutdown
-//// 
+////
 ////   // The `Push` message is used to add a new element to the stack.
 ////   // It contains the item to add, the type of which is the `element`
 ////   // parameterised type.
 ////   Push(push: element)
-//// 
+////
 ////   // The `Pop` message is used to remove an element from the stack.
 ////   // It contains a `Subject`, which is used to send the response back to the
 ////   // message sender. In this case the reply is of type `Result(element, Nil)`.
 ////   Pop(reply_with: Subject(Result(element, Nil)))
 //// }
-//// 
+////
 //// // The last part is to implement the `handle_message` callback function.
 //// //
 //// // This function is called by the Actor for each message it receives.
@@ -102,7 +102,7 @@
 ////     // For the `Shutdown` message we return the `actor.Stop` value, which causes
 ////     // the actor to discard any remaining messages and stop.
 ////     Shutdown -> actor.Stop(process.Normal)
-//// 
+////
 ////     // For the `Push` message we add the new element to the stack and return
 ////     // `actor.continue` with this new stack, causing the actor to process any
 ////     // queued messages or wait for more.
@@ -110,7 +110,7 @@
 ////       let new_state = [value, ..stack]
 ////       actor.continue(new_state)
 ////     }
-//// 
+////
 ////     // For the `Pop` message we attempt to remove an element from the stack,
 ////     // sending it or an error back to the caller, before continuing.
 ////     Pop(client) ->
@@ -121,7 +121,7 @@
 ////           process.send(client, Error(Nil))
 ////           actor.continue([])
 ////         }
-//// 
+////
 ////         [first, ..rest] -> {
 ////           // Otherwise we send the first element back and use the remaining
 ////           // elements as the new state.
@@ -139,7 +139,8 @@ import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom
 import gleam/erlang/charlist.{type Charlist}
 import gleam/erlang/process.{
-  type ExitReason, type Pid, type Selector, type Subject, Abnormal,
+  type ExitReason, type Pid, type Selector, type Subject, Abnormal, Killed,
+  Normal,
 }
 import gleam/option.{type Option, None, Some}
 import gleam/otp/system.{
@@ -255,9 +256,14 @@ pub type Spec(state, msg) {
   )
 }
 
-// TODO: Check needed functionality here to be OTP compatible
 fn exit_process(reason: ExitReason) -> ExitReason {
-  // TODO
+  let self = process.self()
+  case reason {
+    Normal -> process.send_exit(self)
+    Killed -> process.kill(self)
+    Abnormal(abnormality) -> process.send_abnormal_exit(self, abnormality)
+  }
+
   reason
 }
 
